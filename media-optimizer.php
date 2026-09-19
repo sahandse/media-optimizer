@@ -25,6 +25,8 @@ final class MO_Plugin {
         add_action('add_attachment', [$this, 'maybe_auto_optimize']);
         add_action('admin_post_mo_batch_optimize', [$this, 'batch_optimize']);
         add_action('admin_post_mo_restore', [$this, 'restore_image']);
+        add_action('mo_daily_optimize', [$this, 'scheduled_optimize']);
+        add_action('admin_init', [$this, 'sync_schedule']);
     }
 
     public function defaults() {
@@ -214,6 +216,7 @@ final class MO_Plugin {
         clearstatcache(true,$target);
         $after = file_exists($target) ? filesize($target) : $before;
         update_post_meta($attachment_id,'_mo_saved_bytes',max(0,$before-$after));
+        update_post_meta($attachment_id,'_mo_optimized_at',current_time('mysql'));
         delete_post_meta($attachment_id,'_mo_optimizer_pending');
 
         $meta = wp_generate_attachment_metadata($attachment_id,$target);
@@ -252,7 +255,25 @@ final class MO_Plugin {
         $meta=wp_generate_attachment_metadata($id,$original); if($meta) wp_update_attachment_metadata($id,$meta);
         delete_post_meta($id,'_mo_saved_bytes');
         wp_safe_redirect(admin_url('upload.php')); exit;
+    }    public function sync_schedule() {
+        $enabled='yes'===$this->settings()['scheduled'];
+        $next=wp_next_scheduled('mo_daily_optimize');
+        if($enabled && !$next) wp_schedule_event(time()+HOUR_IN_SECONDS,'daily','mo_daily_optimize');
+        if(!$enabled && $next) wp_clear_scheduled_hook('mo_daily_optimize');
     }
+
+    public function scheduled_optimize() {
+        $s=$this->settings();
+        if('yes'!==$s['scheduled']) return;
+        $ids=get_posts([
+            'post_type'=>'attachment','post_status'=>'inherit','post_mime_type'=>'image',
+            'posts_per_page'=>(int)$s['batch_size'],'fields'=>'ids','orderby'=>'date','order'=>'ASC',
+            'meta_query'=>[['key'=>'_mo_optimized_at','compare'=>'NOT EXISTS']]
+        ]);
+        foreach($ids as $id) $this->optimize_attachment($id);
+    }
+
+
 }
 
 new MO_Plugin();
