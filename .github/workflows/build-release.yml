@@ -1,9 +1,16 @@
-name: Build Plugin ZIP
+name: Build media-optimizer Installable ZIP
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths:
+      - '**/*.php'
+      - 'assets/**'
+      - 'includes/**'
+      - 'languages/**'
+      - 'readme.txt'
+      - 'README.md'
+      - '.github/workflows/build-release.yml'
   workflow_dispatch:
 
 permissions:
@@ -12,30 +19,42 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Prepare plugin
+      - uses: actions/checkout@v4
+      - name: Read version
+        id: version
+        shell: bash
         run: |
-          mkdir -p build/media-optimizer
-          rsync -av --exclude='.git' --exclude='.github' --exclude='build' ./ build/media-optimizer/
-
-      - name: Create ZIP
+          VERSION=$(grep 'Version:' media-optimizer.php | head -1 | sed 's/.*Version:[[:space:]]*//')
+          test -n "$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: PHP syntax check
+        shell: bash
         run: |
+          set -e
+          find . -type f -name '*.php' -not -path './vendor/*' -print0 | xargs -0 -n1 php -l
+      - name: Build ZIP
+        shell: bash
+        run: |
+          rm -rf dist build
+          mkdir -p dist build/media-optimizer
+          rsync -a --exclude='.git' --exclude='.github' --exclude='build' --exclude='dist' ./ build/media-optimizer/
           cd build
-          zip -r media-optimizer.zip media-optimizer
-
+          zip -qr ../dist/media-optimizer.zip media-optimizer
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: media-optimizer
-          path: build/media-optimizer.zip
-
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: build/media-optimizer.zip
-          generate_release_notes: true
+          name: media-optimizer-v${{ steps.version.outputs.version }}
+          path: dist/media-optimizer.zip
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          TAG="media-optimizer-v${VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/media-optimizer.zip --clobber
+          else
+            gh release create "$TAG" dist/media-optimizer.zip --title "media-optimizer v${VERSION}" --notes "Installable WordPress ZIP for media-optimizer v${VERSION}."
+          fi
