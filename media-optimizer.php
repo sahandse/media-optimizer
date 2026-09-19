@@ -3,7 +3,7 @@
  * Plugin Name: بهینه‌ساز رسانه
  * Plugin URI: https://github.com/sahandse/media-optimizer
  * Description: بهینه‌سازی تصاویر وردپرس با پردازش دسته‌ای، تبدیل WebP/AVIF، انتخاب کیفیت، Restore و گزارش صرفه‌جویی.
- * Version: 1.0.1
+ * Version: 1.1.0
  * Author: Sahand Rezvan
  * Author URI: https://github.com/sahandse
  * Text Domain: media-optimizer
@@ -23,6 +23,8 @@ final class MO_Plugin {
         add_action('admin_enqueue_scripts', [$this, 'admin_assets']);
         add_filter('attachment_fields_to_edit', [$this, 'media_fields'], 10, 2);
         add_action('add_attachment', [$this, 'maybe_auto_optimize']);
+        add_action('admin_post_mo_batch_optimize', [$this, 'batch_optimize']);
+        add_action('admin_post_mo_restore', [$this, 'restore_image']);
     }
 
     public function defaults() {
@@ -134,7 +136,8 @@ final class MO_Plugin {
 
                     <section class="mo-card">
                         <h2>پردازش دسته‌ای</h2>
-                        <p>زیرساخت تنظیمات آماده است. موتور پردازش، Restore واقعی و گزارش حجم در نسخه تکمیلی همین Repo فعال می‌شود.</p>
+                        <p>پردازش واقعی تصاویر با Image Editor وردپرس، نگهداری Backup و گزارش میزان صرفه‌جویی.</p>
+                        <p><a class="button button-primary" href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=mo_batch_optimize'),'mo_batch_optimize')); ?>">بهینه‌سازی دسته‌ای</a></p>
                     </section>
                 </div>
 
@@ -149,6 +152,7 @@ final class MO_Plugin {
 
         $saved = (int)get_post_meta($post->ID, '_mo_saved_bytes', true);
 
+        $restore = wp_nonce_url(admin_url('admin-post.php?action=mo_restore&attachment='.$post->ID),'mo_restore_'.$post->ID);
         $fields['mo_status'] = [
             'label' => 'بهینه‌سازی',
             'input' => 'html',
@@ -156,18 +160,98 @@ final class MO_Plugin {
                 ($saved > 0
                     ? 'صرفه‌جویی: <strong>' . esc_html(size_format($saved)) . '</strong>'
                     : 'هنوز گزارشی ثبت نشده است.') .
+                (get_post_meta($post->ID,'_mo_backup_path',true) ? ' · <a href="' . esc_url($restore) . '">Restore</a>' : '') .
                 '</div>',
         ];
 
         return $fields;
     }
 
+    private function optimize_attachment($attachment_id) {
+        if (!wp_attachment_is_image($attachment_id)) return new WP_Error('mo_not_image','فایل تصویر نیست.');
+
+        $file = get_attached_file($attachment_id);
+        if (!$file || !file_exists($file)) return new WP_Error('mo_missing','فایل پیدا نشد.');
+
+        $s = $this->settings();
+        $before = filesize($file);
+        $backup = get_post_meta($attachment_id,'_mo_backup_path',true);
+
+        if ('yes' === $s['keep_original'] && !$backup) {
+            $backup = $file . '.mo-original';
+            if (!@copy($file,$backup)) return new WP_Error('mo_backup','ساخت Backup ناموفق بود.');
+            update_post_meta($attachment_id,'_mo_backup_path',$backup);
+            update_post_meta($attachment_id,'_mo_original_file',$file);
+        }
+
+        require_once ABSPATH . 'wp-admin/includes/image.php';
+        $editor = wp_get_image_editor($file);
+        if (is_wp_error($editor)) return $editor;
+        $editor->set_quality((int)$s['quality']);
+
+        $target = $file;
+        $mime = get_post_mime_type($attachment_id);
+
+        if ('webp' === $s['format'] || 'avif' === $s['format']) {
+            $new_mime = 'webp' === $s['format'] ? 'image/webp' : 'image/avif';
+            $new_ext  = 'webp' === $s['format'] ? 'webp' : 'avif';
+            $target   = preg_replace('/\.[^.]+$/', '.' . $new_ext, $file);
+            $saved = $editor->save($target,$new_mime);
+            if (is_wp_error($saved)) {
+                $saved = $editor->save($file);
+                if (is_wp_error($saved)) return $saved;
+                $target = $file;
+            } else {
+                update_attached_file($attachment_id,$target);
+                wp_update_post(['ID'=>$attachment_id,'post_mime_type'=>$new_mime]);
+                if ($target !== $file && file_exists($file) && 'yes' !== $s['keep_original']) @unlink($file);
+            }
+        } else {
+            $saved = $editor->save($file);
+            if (is_wp_error($saved)) return $saved;
+        }
+
+        clearstatcache(true,$target);
+        $after = file_exists($target) ? filesize($target) : $before;
+        update_post_meta($attachment_id,'_mo_saved_bytes',max(0,$before-$after));
+        delete_post_meta($attachment_id,'_mo_optimizer_pending');
+
+        $meta = wp_generate_attachment_metadata($attachment_id,$target);
+        if ($meta) wp_update_attachment_metadata($attachment_id,$meta);
+
+        return ['before'=>$before,'after'=>$after,'saved'=>max(0,$before-$after)];
+    }
+
     public function maybe_auto_optimize($attachment_id) {
         if ('yes' !== $this->settings()['auto_optimize']) return;
         if (!wp_attachment_is_image($attachment_id)) return;
+        $this->optimize_attachment($attachment_id);
+    }
 
-        // Placeholder hook for the real image processor.
-        update_post_meta($attachment_id, '_mo_optimizer_pending', 1);
+    public function batch_optimize() {
+        if (!current_user_can('upload_files')) wp_die('دسترسی غیرمجاز');
+        check_admin_referer('mo_batch_optimize');
+        $limit=(int)$this->settings()['batch_size'];
+        $ids=get_posts(['post_type'=>'attachment','post_status'=>'inherit','post_mime_type'=>'image','posts_per_page'=>$limit,'fields'=>'ids','orderby'=>'date','order'=>'DESC']);
+        $done=0;
+        foreach($ids as $id){ $r=$this->optimize_attachment($id); if(!is_wp_error($r)) $done++; }
+        wp_safe_redirect(add_query_arg(['page'=>'media-optimizer','mo_done'=>$done],admin_url('admin.php'))); exit;
+    }
+
+    public function restore_image() {
+        if (!current_user_can('upload_files')) wp_die('دسترسی غیرمجاز');
+        $id=absint($_GET['attachment']??0); check_admin_referer('mo_restore_'.$id);
+        $backup=get_post_meta($id,'_mo_backup_path',true);
+        $original=get_post_meta($id,'_mo_original_file',true);
+        if(!$backup||!file_exists($backup)||!$original) wp_die('Backup پیدا نشد.');
+        if(!@copy($backup,$original)) wp_die('Restore ناموفق بود.');
+        update_attached_file($id,$original);
+        $type=wp_check_filetype($original);
+        if(!empty($type['type'])) wp_update_post(['ID'=>$id,'post_mime_type'=>$type['type']]);
+        require_once ABSPATH.'wp-admin/includes/image.php';
+        $meta=wp_generate_attachment_metadata($id,$original); if($meta) wp_update_attachment_metadata($id,$meta);
+        delete_post_meta($id,'_mo_saved_bytes');
+        wp_safe_redirect(admin_url('upload.php')); exit;
     }
 }
 
