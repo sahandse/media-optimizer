@@ -3,7 +3,7 @@
  * Plugin Name: بهینه‌ساز رسانه
  * Plugin URI: https://github.com/sahandse/media-optimizer
  * Description: بهینه‌سازی تصاویر وردپرس با پردازش دسته‌ای، تبدیل WebP/AVIF، انتخاب کیفیت، Restore و گزارش صرفه‌جویی.
- * Version: 1.1.0
+ * Version: 1.3.1
  * Author: Sahand Rezvan
  * Author URI: https://github.com/sahandse
  * Text Domain: media-optimizer
@@ -14,7 +14,7 @@
 defined('ABSPATH') || exit;
 
 final class MO_Plugin {
-    const VERSION = '1.0.1';
+    const VERSION = '1.3.1';
     const OPTION  = 'mo_settings';
 
     public function __construct() {
@@ -277,3 +277,6 @@ final class MO_Plugin {
 }
 
 new MO_Plugin();
+
+$mo_adv = __DIR__ . '/includes/class-media-optimizer-advanced.php';
+if ( file_exists( $mo_adv ) ) { require_once $mo_adv; }
